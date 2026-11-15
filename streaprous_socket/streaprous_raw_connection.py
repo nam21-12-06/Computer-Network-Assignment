@@ -50,8 +50,9 @@ conn_struct = namedtuple('conn_struct', [
     'server_seq',
     'client_seq',
     'expected_final_ack',
-    'last_activity'
-])
+    'last_activity',
+    'pending'
+], defaults=[None])
 
 
 # Global table to manage multiple connection
@@ -806,6 +807,11 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
             print(f"[Streap_raw] run_conn_send Connection not found for {client_ip}:{client_port}")
             return -1
         session = connections[client_key]
+        if session.pending is not None:
+            print(f"[Streap_raw] run_conn_send Cannot send more data until ACK from {client_ip}:{client_port}")
+            return -1
+        if not payload:
+            return 0
     
     try:
         bytes_sent = send_tcp_data_segment(
@@ -814,15 +820,24 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
         )
         
         print(f"[Streap_raw] run_conn_send Sent {bytes_sent} bytes to {client_ip}:{client_port}")
-        
+
+        # Previous code from the instructor, kept for comparison:
         # Update sequence numbers
+        # with connections_lock:
+        #     if client_key in connections:
+        #         connections[client_key] = session._replace(
+        #             server_seq=session.server_seq + bytes_sent,
+        #             last_activity=time.time()
+        #         )
+
         with connections_lock:
             if client_key in connections:
                 connections[client_key] = session._replace(
-                    server_seq=session.server_seq + bytes_sent,
+                    server_seq=(session.server_seq + bytes_sent) & 0xFFFFFFFF,
+                    pending=(session.server_seq, payload),
                     last_activity=time.time()
                 )
-        
+
         return bytes_sent
         
     except Exception as e:
