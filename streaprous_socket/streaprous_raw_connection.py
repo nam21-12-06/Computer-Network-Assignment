@@ -727,15 +727,26 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                 if len(app_payload) > 0:
                     print(f"[Streap_raw] Received {len(app_payload)} bytes of data from {client_ip}:{client_port}")
                     print(f"[Streap_raw] Received payload: {app_payload[:100]}...")
-                    
-                    # Send ACK for received data IMMEDIATELY (fast path)
-                    next_ack = pkt_seq + len(app_payload)
+
+                    # Old behavior: ACKed data without checking its sequence.
+                    # next_ack = pkt_seq + len(app_payload)
+
+                    # Only data at the next expected sequence can be delivered.
+                    in_order = pkt_seq == session.client_seq
+                    if in_order:
+                        next_ack = (session.client_seq + len(app_payload)) & 0xFFFFFFFF
+                    else:
+                        next_ack = session.client_seq
                     
                     ack_packet = build_tcp_packet(session.server_ip, client_ip, listen_port, client_port,
                                                   seq=session.server_seq, ack_seq=next_ack, ack=1)
                     ip_header = build_ip_header(session.server_ip, client_ip, socket.IPPROTO_TCP, len(ack_packet))
                     s.sendto(ip_header + ack_packet, (client_ip, 0))
                     print(f"[Streap_raw] Sent ACK for data (Ack={next_ack})")
+
+                    if not in_order:
+                        # Repeat the current ACK, but do not deliver this data.
+                        continue
                     
                     # Update sequence numbers AFTER ACK sent
                     with connections_lock:
