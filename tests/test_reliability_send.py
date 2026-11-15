@@ -1,8 +1,10 @@
 """Tests for one outstanding TCP payload per connection."""
 
+import queue
 import struct
 import time
 import unittest
+from unittest.mock import patch
 
 from streaprous_socket import streaprous_raw_connection as raw
 
@@ -17,6 +19,24 @@ class FakeSocket:
             raise OSError("send failed")
         self.sent.append((packet, address))
         return len(packet)
+
+
+def incoming_ack(ack_number):
+    ip_header = bytes([0x45]) + bytes(19)
+    tcp_header = struct.pack(
+        "!HHLLBBHHH", 40000, 9000, 101, ack_number,
+        5 << 4, 0x10, 5840, 0, 0,
+    )
+    return ip_header + tcp_header
+
+
+def incoming_data():
+    ip_header = bytes([0x45]) + bytes(19)
+    tcp_header = struct.pack(
+        "!HHLLBBHHH", 40000, 9000, 101, 0,
+        5 << 4, 0x18, 5840, 0, 0,
+    )
+    return ip_header + tcp_header + b"ok"
 
 
 class PendingSendTests(unittest.TestCase):
@@ -56,6 +76,25 @@ class PendingSendTests(unittest.TestCase):
         session = raw.connections[self.key]
         self.assertEqual(session.server_seq, 2001)
         self.assertIsNone(session.pending)
+
+    def receive_ack(self, ack_number):
+        raw.run_conn_send(FakeSocket(), self.connection, b"abc")
+        packet_queue = queue.Queue()
+        packet_queue.put((incoming_ack(ack_number), ("127.0.0.1", 0)))
+        packet_queue.put((incoming_data(), ("127.0.0.1", 0)))
+        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+            raw.run_conn_recv(FakeSocket(), self.connection)
+        return raw.connections[self.key]
+
+    def test_expected_ack_clears_pending_payload(self):
+        session = self.receive_ack(2004)
+        self.assertIsNone(session.pending)
+        self.assertEqual(session.server_seq, 2004)
+
+    def test_wrong_ack_keeps_pending_payload(self):
+        session = self.receive_ack(2003)
+        self.assertEqual(session.pending, (2001, b"abc"))
+        self.assertEqual(session.server_seq, 2004)
 
 
 if __name__ == "__main__":

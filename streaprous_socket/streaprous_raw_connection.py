@@ -766,13 +766,21 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                 print(f"[Streap_raw] Received ACK from {client_ip}:{client_port} (Ack={pkt_ack})")
                 # Check if the ack server waiting for is the same to pkt_ack
                 #ex : server_seq = 2001, so if ACK = 2001 its gonna be accepted, if 1999 is declined
-                if pkt_ack != session.server_seq:
-                    print(f"[Streap_raw] Ignoring ACK {pkt_ack}; expected {session.server_seq}")
+                if session.pending is None:
+                    print(f"[Streap_raw] Ignoring ACK {pkt_ack}; no payload is waiting")
+                    continue
+
+                pending_seq, pending_payload = session.pending
+                expected_ack = (pending_seq + len(pending_payload)) & 0xFFFFFFFF
+                if pkt_ack != expected_ack:
+                    print(f"[Streap_raw] Ignoring ACK {pkt_ack}; expected {expected_ack}")
                     continue
 
                 with connections_lock:
-                    if client_key in connections:
-                        connections[client_key] = session._replace(
+                    current = connections.get(client_key)
+                    if current is not None and current.pending == session.pending:
+                        connections[client_key] = current._replace(
+                            pending=None,
                             last_activity=time.time()
                         )
 
