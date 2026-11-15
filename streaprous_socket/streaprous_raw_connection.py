@@ -51,8 +51,11 @@ conn_struct = namedtuple('conn_struct', [
     'client_seq',
     'expected_final_ack',
     'last_activity',
-    'pending'
-], defaults=[None])
+    'pending',
+    'srtt',
+    'rttvar',
+    'rto'
+], defaults=[None, None, None, None])
 
 
 # Global table to manage multiple connection
@@ -71,6 +74,25 @@ handshake_in_progress = {}
 DEFAULT_LISTEN_IP = "0.0.0.0"
 DEFAULT_LISTEN_PORT = 22239
 DEFAULT_INTERFACE_NAME = "lo0"
+INITIAL_RTO = 1.0
+MAX_RETRANSMISSIONS = 3
+MIN_RTO = 1.0
+MAX_RTO = 60.0
+CLOCK_GRANULARITY = 0.001
+
+
+def _update_rto(session, sample):
+    """Update the simple RTT estimate and return the new connection state."""
+    if session.srtt is None:
+        srtt = sample
+        rttvar = sample / 2
+    else:
+        rttvar = 0.75 * session.rttvar + 0.25 * abs(session.srtt - sample)
+        srtt = 0.875 * session.srtt + 0.125 * sample
+
+    rto = srtt + max(CLOCK_GRANULARITY, 4 * rttvar)
+    rto = min(MAX_RTO, max(MIN_RTO, rto))
+    return session._replace(srtt=srtt, rttvar=rttvar, rto=rto)
 
 def register_keep_port_alive(listen_ip="0.0.0.0", listen_port=22239, retry_interval=10):
     """
@@ -822,6 +844,7 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
             return 0
     
     try:
+        sent_at = time.monotonic()
         bytes_sent = send_tcp_data_segment(
             s, listen_ip, client_ip, listen_port, client_port,
             seq=session.server_seq, ack_seq=session.client_seq, payload=payload
@@ -846,7 +869,56 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
                     last_activity=time.time()
                 )
 
-        return bytes_sent
+        packet_queue = get_packet_queue(client_key)
+        expected_ack = (session.server_seq + bytes_sent) & 0xFFFFFFFF
+        rto = session.rto if session.rto is not None else INITIAL_RTO
+        retransmissions = 0
+
+        while True:
+            try:
+                packet, _ = packet_queue.get(timeout=rto)
+            except queue.Empty:
+                if retransmissions >= MAX_RETRANSMISSIONS:
+                    print(f"[Streap_raw] No ACK from {client_ip}:{client_port}; giving up")
+                    return -1
+
+                rto = min(MAX_RTO, rto * 2)
+                with connections_lock:
+                    current = connections.get(client_key)
+                    if current is not None and current.pending == (session.server_seq, payload):
+                        connections[client_key] = current._replace(rto=rto)
+
+                send_tcp_data_segment(
+                    s, listen_ip, client_ip, listen_port, client_port,
+                    seq=session.server_seq, ack_seq=session.client_seq, payload=payload
+                )
+                retransmissions += 1
+                continue
+
+            ip_header_len = (packet[0] & 0x0F) * 4
+            tcp_packet = packet[ip_header_len:]
+            if len(tcp_packet) < 20:
+                continue
+
+            ack_fields = struct.unpack("!HHLLBBHHH", tcp_packet[:20])
+            ack_flag = (ack_fields[5] & 0x10) >> 4
+            if not ack_flag or ack_fields[3] != expected_ack:
+                continue
+
+            with connections_lock:
+                current = connections.get(client_key)
+                if current is not None and current.pending == (session.server_seq, payload):
+                    if retransmissions == 0:
+                        rtt_sample = time.monotonic() - sent_at
+                        current = _update_rto(current, rtt_sample)
+                    connections[client_key] = current._replace(
+                        pending=None,
+                        last_activity=time.time()
+                    )
+            return bytes_sent
+
+        # Old immediate-send behavior returned here without waiting for ACK.
+        # return bytes_sent
         
     except Exception as e:
         print(f"[Streap_raw] run_conn_send Error in run_conn_send: {e}")
