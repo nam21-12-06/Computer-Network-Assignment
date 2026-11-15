@@ -33,6 +33,15 @@ def incoming_data(seq, payload):
     return ip_header + tcp_header + payload
 
 
+def incoming_ack(ack_number):
+    ip_header = bytes([0x45]) + bytes(19)
+    tcp_header = struct.pack(
+        "!HHLLBBHHH", CLIENT_PORT, SERVER_PORT, 101, ack_number,
+        5 << 4, 0x10, 5840, 0, 0,
+    )
+    return ip_header + tcp_header
+
+
 class ReceiveSequenceTests(unittest.TestCase):
     def setUp(self):
         self.key = (CLIENT_IP, CLIENT_PORT)
@@ -75,6 +84,24 @@ class ReceiveSequenceTests(unittest.TestCase):
         self.assertEqual(data, b"new")
         self.assertEqual(acks, [101, 104])
         self.assertEqual(raw.connections[self.key].client_seq, 104)
+
+    def test_old_ack_does_not_move_server_sequence(self):
+        packet_queue = queue.Queue()
+        packet_queue.put((incoming_ack(1999), (CLIENT_IP, 0)))
+        packet_queue.put((incoming_data(101, b"ok"), (CLIENT_IP, 0)))
+        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+            data = raw.run_conn_recv(FakeSocket(), self.connection)
+        self.assertEqual(data, b"ok")
+        self.assertEqual(raw.connections[self.key].server_seq, 2001)
+
+    def test_future_ack_does_not_move_server_sequence(self):
+        packet_queue = queue.Queue()
+        packet_queue.put((incoming_ack(3000), (CLIENT_IP, 0)))
+        packet_queue.put((incoming_data(101, b"ok"), (CLIENT_IP, 0)))
+        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+            data = raw.run_conn_recv(FakeSocket(), self.connection)
+        self.assertEqual(data, b"ok")
+        self.assertEqual(raw.connections[self.key].server_seq, 2001)
 
 
 if __name__ == "__main__":

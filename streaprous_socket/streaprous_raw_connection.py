@@ -763,10 +763,15 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
             # Handle pure ACK (no data)
             elif ack_flag and not syn_flag and not psh_flag and not has_data:
                 print(f"[Streap_raw] Received ACK from {client_ip}:{client_port} (Ack={pkt_ack})")
+                # Check if the ack server waiting for is the same to pkt_ack
+                #ex : server_seq = 2001, so if ACK = 2001 its gonna be accepted, if 1999 is declined
+                if pkt_ack != session.server_seq:
+                    print(f"[Streap_raw] Ignoring ACK {pkt_ack}; expected {session.server_seq}")
+                    continue
+
                 with connections_lock:
                     if client_key in connections:
                         connections[client_key] = session._replace(
-                            server_seq=pkt_ack,
                             last_activity=time.time()
                         )
 
