@@ -10,4 +10,15 @@
 # while attending the course
 #
 
-from .sampleapp import create_sampleapp
+def create_sampleapp(ip, port):
+    """Lazily import the sample app so service-only modules stay lightweight."""
+    from .sampleapp import create_sampleapp as factory
+
+    return factory(ip, port)
+
+
+def create_tracker_app(ip, port):
+    """Lazily import the tracker app so its pure services remain testable."""
+    from .tracker_app import create_tracker_app as factory
+
+    return factory(ip, port)

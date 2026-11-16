@@ -81,7 +81,7 @@ class Request():
             if path == '/':
                 path = '/index.html'
         except Exception:
-            return None, None
+            return None, None, None
 
         return method, path, version
              
@@ -112,17 +112,9 @@ class Request():
         self.method, self.path, self.version = self.extract_request_line(request)
         print("[Request] {} path {} version {}".format(self.method, self.path, self.version))
 
-        #
-        # TODO:  Parse headers and body 
-        # with self.fetch_headers_body(request)
-        # and self.prepare_headers(self._raw_headers)
-        #
-
-        # self._raw_headers = ... 
-        # self._raw_body =...
-        # self.headers = ...
-        
-        self.prepare_headers(self._raw_headers)
+        self._raw_headers, self._raw_body = self.fetch_headers_body(request)
+        self.headers = CaseInsensitiveDict(self.prepare_headers(self._raw_headers))
+        self.body = self._raw_body
         print("[Request] Parsed headers: {}".format(self.headers))
 
         #

@@ -26,7 +26,10 @@ import threading
 import time
 import queue
 from collections import namedtuple
-import netifaces
+try:
+    import netifaces
+except ImportError:
+    netifaces = None
 
 # Import streaprout packet dispatcher functions
 from .streaprous_packet_dispatcher import (
@@ -340,11 +343,11 @@ def get_interface_ip(interface_name: str = None) -> str:
         IPv4 address string
     """
     try:
-        if interface_name:
+        if netifaces and interface_name:
             addrs = netifaces.ifaddresses(interface_name)
             if netifaces.AF_INET in addrs:
                 return addrs[netifaces.AF_INET][0]['addr']
-        else:
+        elif netifaces:
             # Try to get default route interface
             gateways = netifaces.gateways()
             default_gateway = gateways.get('default', {}).get(netifaces.AF_INET)
