@@ -49,8 +49,7 @@ def check_scope(kind: int, target_id: int) -> None:
         min_target = 1    
     require_int("target_id", target_id, min_target, MAX_U32)
     
-    
-@dataclass(frozen = True, slots = True)    
+       
 class ChatMessage:
     kind: int
     msg_id: UUID
@@ -82,7 +81,6 @@ class ChatMessage:
             raise ProtocolError("Invalid text length")
         
         
-@dataclass(frozen=True, slots=True)
 class SyncRequest:
     scope: int
     target_id: int
@@ -95,7 +93,6 @@ class SyncRequest:
         require_int("limit", self.limit, 1, MAX_SYNC_BATCH)
 
 
-@dataclass(frozen=True, slots=True)
 class SyncEnd:
     scope: int
     target_id: int
