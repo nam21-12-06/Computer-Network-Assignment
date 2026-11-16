@@ -57,6 +57,9 @@ conn_struct = namedtuple('conn_struct', [
     'last_activity'
 ])
 
+# Alias for Transport Layer interface
+ConnectionInfo = conn_struct
+
 
 # Global table to manage multiple connection
 # The mapping include {key: value} as { (client_ip, client_port): conn_struct }
@@ -363,6 +366,7 @@ class TcpControlState:
         self.rtt = RttEstimator()
         self.peer_rwnd = peer_rwnd      # latest window advertised by the client
         self.trace = []                 # (time, event, cwnd, ssthresh, peer_rwnd, inflight) for plotting
+        self.lock = threading.Lock()
 
 
 # Global table { (client_ip, client_port): TcpControlState }
@@ -1007,6 +1011,77 @@ def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: s
         raise
 
 
+def connect(s: socket.socket, src_ip: str, src_port: int, dst_ip: str,
+            dst_port: int, interface_name: str = None) -> conn_struct:
+    """Perform active 3-way handshake to connect to remote server/peer."""
+    client_key = (dst_ip, dst_port)
+    start_packet_dispatcher(s, src_port)
+    packet_queue = get_packet_queue(client_key)
+
+    initial_seq = 1000
+    syn_packet = build_tcp_packet(src_ip, dst_ip, src_port, dst_port,
+                                  seq=initial_seq, ack_seq=0, syn=1, window=RECV_BUFFER_SIZE)
+    ip_hdr = build_ip_header(src_ip, dst_ip, socket.IPPROTO_TCP, len(syn_packet))
+
+    # Send SYN
+    s.sendto(ip_hdr + syn_packet, (dst_ip, 0))
+    print(f"[Streap_raw] connect: Sent SYN to {dst_ip}:{dst_port}")
+
+    # Wait for SYN-ACK
+    deadline = time.time() + 5.0
+    server_seq = 0
+    server_win = MAX_WINDOW
+
+    while time.time() < deadline:
+        try:
+            packet, addr = packet_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        ihl = (packet[0] & 0x0F) * 4
+        tcp_pkt = packet[ihl:]
+        if len(tcp_pkt) < 20:
+            continue
+
+        src_p, dst_p, seq, ack, off_res, flags, win = struct.unpack('!HHLLBBH', tcp_pkt[:16])
+        if src_p == dst_port and dst_p == src_port:
+            is_syn = bool(flags & 0x02)
+            is_ack = bool(flags & 0x10)
+            if is_syn and is_ack and ack == initial_seq + 1:
+                server_seq = seq
+                server_win = win
+                break
+    else:
+        raise TimeoutError(f"Connection to {dst_ip}:{dst_port} timed out")
+
+    # Send final ACK
+    final_seq = initial_seq + 1
+    next_ack = (server_seq + 1) % SEQ_MOD
+    ack_packet = build_tcp_packet(src_ip, dst_ip, src_port, dst_port,
+                                  seq=final_seq, ack_seq=next_ack, ack=1, window=RECV_BUFFER_SIZE)
+    ip_hdr = build_ip_header(src_ip, dst_ip, socket.IPPROTO_TCP, len(ack_packet))
+    s.sendto(ip_hdr + ack_packet, (dst_ip, 0))
+    print(f"[Streap_raw] connect: Sent final ACK to {dst_ip}:{dst_port}")
+
+    conn_info = conn_struct(
+        client_ip=dst_ip,
+        client_port=dst_port,
+        server_ip=src_ip,
+        server_port=src_port,
+        state="ESTABLISHED",
+        server_seq=final_seq,
+        client_seq=next_ack,
+        expected_final_ack=final_seq,
+        last_activity=time.time()
+    )
+
+    with connections_lock:
+        connections[client_key] = conn_info
+
+    create_tcp_state(client_key, rcv_nxt=next_ack, peer_rwnd=server_win)
+    return conn_info
+
+
 def _state_for(client_key, conn_info):
     """Return the flow/congestion control state of a connection, creating it if needed."""
     state = get_tcp_state(client_key)
@@ -1027,7 +1102,7 @@ def _send_ack(s, session, state, client_ip, client_port, listen_port, reason="AC
     print(f"[Streap_raw] Sent {reason} (Ack={state.rcv.rcv_nxt}, rwnd={window})")
 
 
-def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
+def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = None) -> bytes:
     """
     Receive data on an established connection using raw sockets.
     This function handles incoming packets for a specific connection by reading
@@ -1062,12 +1137,19 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
 
     print(f"[Streap_raw] run_conn_recv: Starting receive loop for {client_ip}:{client_port} (waiting for data...)")
 
+    deadline = time.time() + timeout if timeout is not None else None
+
     try:
         while True:
+            if deadline is not None and time.time() >= deadline:
+                return b""
             # Get packet from the dispatcher queue instead of reading directly from socket
             try:
-                packet, _addr = packet_queue.get(timeout=1.0)
+                wait_t = 1.0 if deadline is None else max(0.05, min(1.0, deadline - time.time()))
+                packet, _addr = packet_queue.get(timeout=wait_t)
             except queue.Empty:
+                if deadline is not None and time.time() >= deadline:
+                    return b""
                 continue
 
             seg = parse_tcp_segment(packet)
@@ -1459,3 +1541,45 @@ def close_all_connections():
     """Close all connections and clean up."""
     with connections_lock:
         connections.clear()
+    with tcp_states_lock:
+        tcp_states.clear()
+
+
+# Unified interface functions for Application layer
+def transport_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> int:
+    return run_conn_send(s, conn_info, payload)
+
+
+def transport_recv(s: socket.socket, conn_info: conn_struct, timeout: float = None) -> bytes:
+    return run_conn_recv(s, conn_info, timeout=timeout)
+
+
+def transport_close(s: socket.socket, conn_info: conn_struct):
+    close_connection(s, conn_info)
+
+
+class RawTransportSocket:
+    """Object-oriented wrapper for Transport Layer."""
+    def __init__(self, raw_sock=None, interface=None):
+        self.sock = raw_sock or create_raw_socket()
+        self.interface = interface
+        self.conn_info = None
+
+    def accept(self, listen_ip, listen_port):
+        self.conn_info = accept(self.sock, listen_ip, listen_port, self.interface)
+        return self.conn_info
+
+    def connect(self, src_ip, src_port, dst_ip, dst_port):
+        self.conn_info = connect(self.sock, src_ip, src_port, dst_ip, dst_port, self.interface)
+        return self.conn_info
+
+    def send(self, data: bytes) -> int:
+        return run_conn_send(self.sock, self.conn_info, data)
+
+    def recv(self, timeout: float = None) -> bytes:
+        return run_conn_recv(self.sock, self.conn_info, timeout=timeout)
+
+    def close(self):
+        if self.conn_info:
+            close_connection(self.sock, self.conn_info)
+            self.conn_info = None
