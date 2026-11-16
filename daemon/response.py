@@ -279,6 +279,16 @@ class Response():
         """
         print("[Response] Start build response with req {}".format(request))
 
+        # Route handlers return a JSON payload rather than a file path.
+        if envelop_content is not None:
+            if isinstance(envelop_content, str):
+                envelop_content = envelop_content.encode('utf-8')
+            if not isinstance(envelop_content, bytes):
+                raise TypeError("Route response must be bytes or str")
+            self.headers['Content-Type'] = 'application/json; charset=utf-8'
+            self._content = envelop_content
+            return self.build_response_header(request) + self._content
+
         path = request.path
 
         mime_type = self.get_mime_type(path)

@@ -166,40 +166,47 @@ class HttpAdapter:
 
         # Receive data using streaprous raw connection
         data = run_conn_recv(raw_socket, conn_info)
-        
+
         if not data:
             print("[HttpAdapter] No data received or connection closed")
             return
 
         # Prepare request
         msg = data.decode("utf-8")
-        req.prepare(msg, routes)
-        
+        try:
+            req.prepare(msg, routes)
+        except ValueError as exc:
+            print("[HttpAdapter] Invalid request: {}".format(exc))
+            response = (
+                b"HTTP/1.1 400 Bad Request\r\n"
+                b"Content-Length: 0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            try:
+                run_conn_send(raw_socket, conn_info, response)
+            finally:
+                close_connection(raw_socket, conn_info)
+            return
+
         # Handle request hook
         if req.hook:
-            #
-            # TODO: handle for App hook here
-            #
-            response = ""
+            result = req.hook(headers=req.headers, body=req.body)
+            response = resp.build_response(req, envelop_content=result)
         else:
             # Build response - returns bytes
             response = resp.build_response(req)
-        
+         
         # Send response using streaprous raw connection
         response = response if isinstance(response, bytes) else response.encode("utf-8")
         print(f"[HttpAdapter] HTTP Response ({len(response)} bytes): {response[:200]}")
-        #
-        # TODO run_conn_send packet
-        # run_conn_send(..)
-        
+        run_conn_send(raw_socket, conn_info, response)
+
         # Wait longer to ensure response is transmitted, client processes it, and sends ACK
         import time
         time.sleep(5.0)
-        
+
         # Close connection with FIN packet
-        #
-        # TODO run_conn_send packet
-        # close_connection(...)
+        close_connection(raw_socket, conn_info)
 
     async def handle_client_coroutine(self, reader, writer):
         """

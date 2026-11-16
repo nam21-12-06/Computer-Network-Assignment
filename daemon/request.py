@@ -80,8 +80,8 @@ class Request():
 
             if path == '/':
                 path = '/index.html'
-        except Exception:
-            return None, None
+        except (IndexError, ValueError) as exc:
+            raise ValueError("Invalid HTTP request line") from exc
 
         return method, path, version
              
@@ -112,35 +112,20 @@ class Request():
         self.method, self.path, self.version = self.extract_request_line(request)
         print("[Request] {} path {} version {}".format(self.method, self.path, self.version))
 
-        #
-        # TODO:  Parse headers and body 
-        # with self.fetch_headers_body(request)
-        # and self.prepare_headers(self._raw_headers)
-        #
-
-        # self._raw_headers = ... 
-        # self._raw_body =...
-        # self.headers = ...
-        
-        self.prepare_headers(self._raw_headers)
+        self._raw_headers, self._raw_body = self.fetch_headers_body(request)
+        self.headers = CaseInsensitiveDict(self.prepare_headers(self._raw_headers))
+        self.body = self._raw_body
         print("[Request] Parsed headers: {}".format(self.headers))
 
         #
         # @bksysnet Preapring the webapp hook with StreapRous instance
         # The default behaviour with HTTP server is empty routed
         #
-        # TODO manage the webapp hook in this mounting point
-        #
-        
-        if not routes == {}:
-            self.routes = routes
+        self.routes = routes if routes is not None else {}
+        self.hook = self.routes.get((self.method, self.path))
+        if self.hook is not None:
             print("[Request] Routing METHOD {} path {}".format(self.method, self.path))
-            self.hook = routes.get((self.method, self.path))
             print("[Request] Hook has request {}".format(request))
-            #
-            # self.hook manipulation goes here
-            # ...
-            #
 
         cookies = self.headers.get('cookie', '')
             #
