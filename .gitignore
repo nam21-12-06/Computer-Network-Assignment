@@ -1,0 +1,49 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and captures (packet traces, cwnd logs for the report)
+*.log
+*.pcap
+*.pcapng
+
+# Certificates and private keys: keep the folder, never commit keys
+cert/*
+!cert/.gitkeep
+
+# Local database files: keep the folder only
+db/*
+!db/.gitkeep
+
+# Environment / secrets
+.env
