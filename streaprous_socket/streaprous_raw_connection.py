@@ -55,7 +55,10 @@ conn_struct = namedtuple('conn_struct', [
     'srtt',
     'rttvar',
     'rto'
-], defaults=[None, None, None, None])
+])
+
+# These are the default values for pending, srtt, rttvar, and rto.
+conn_struct.__new__.__defaults__ = (None, None, None, None)
 
 
 # Global table to manage multiple connection
