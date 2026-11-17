@@ -847,11 +847,13 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
             return 0
     
     try:
+        start_seq = session.server_seq
         sent_at = time.monotonic()
         bytes_sent = send_tcp_data_segment(
             s, listen_ip, client_ip, listen_port, client_port,
-            seq=session.server_seq, ack_seq=session.client_seq, payload=payload
+            seq=start_seq, ack_seq=session.client_seq, payload=payload
         )
+        next_seq = (start_seq + bytes_sent) & 0xFFFFFFFF
         
         print(f"[Streap_raw] run_conn_send Sent {bytes_sent} bytes to {client_ip}:{client_port}")
 
@@ -866,14 +868,10 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
 
         with connections_lock:
             if client_key in connections:
-                connections[client_key] = session._replace(
-                    server_seq=(session.server_seq + bytes_sent) & 0xFFFFFFFF,
-                    pending=(session.server_seq, payload),
-                    last_activity=time.time()
-                )
+                connections[client_key] = session._replace(server_seq=next_seq, pending=(start_seq, payload), last_activity=time.time())
 
         packet_queue = get_packet_queue(client_key)
-        expected_ack = (session.server_seq + bytes_sent) & 0xFFFFFFFF
+        expected_ack = next_seq
         rto = session.rto if session.rto is not None else INITIAL_RTO
         retransmissions = 0
 
@@ -888,12 +886,12 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
                 rto = min(MAX_RTO, rto * 2)
                 with connections_lock:
                     current = connections.get(client_key)
-                    if current is not None and current.pending == (session.server_seq, payload):
+                    if current is not None and current.pending == (start_seq, payload):
                         connections[client_key] = current._replace(rto=rto)
 
                 send_tcp_data_segment(
                     s, listen_ip, client_ip, listen_port, client_port,
-                    seq=session.server_seq, ack_seq=session.client_seq, payload=payload
+                    seq=start_seq, ack_seq=session.client_seq, payload=payload
                 )
                 retransmissions += 1
                 continue
@@ -910,7 +908,7 @@ def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> i
 
             with connections_lock:
                 current = connections.get(client_key)
-                if current is not None and current.pending == (session.server_seq, payload):
+                if current is not None and current.pending == (start_seq, payload):
                     if retransmissions == 0:
                         rtt_sample = time.monotonic() - sent_at
                         current = _update_rto(current, rtt_sample)
