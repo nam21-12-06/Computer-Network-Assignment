@@ -1,14 +1,3 @@
-"""
-Unit tests for flow control (rwnd) and congestion control (CUBIC, loss/RTO)
-in streaprous_socket/streaprous_raw_connection.py.
-
-No raw socket or root privilege is needed: run_conn_send / run_conn_recv are
-driven through a fake socket that plays the role of the TCP client.
-
-Run from the project root:
-    python -m unittest discover -s tests -v
-"""
-
 import contextlib
 import io
 import os
@@ -22,6 +11,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from streaprous_socket import streaprous_raw_connection as rc
+from streaprous_socket import rtt_estimator as rtt_mod
+from streaprous_socket import sender as sender_mod
 from streaprous_socket.streaprous_packet_dispatcher import get_packet_queue, remove_packet_queue
 
 SERVER_IP = "10.0.0.1"
@@ -31,12 +22,7 @@ CLIENT_ISN = 5000
 MSS = 1460
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def client_packet(client_port, seq, payload=b"", ack=0, window=65535, flags=0x18, options=b""):
-    """Build an IPv4 + TCP packet as if sent by the client to the server."""
     offset = (20 + len(options)) // 4
     tcp = struct.pack('!HHLLBBHHH', client_port, SERVER_PORT, seq % rc.SEQ_MOD, ack % rc.SEQ_MOD,
                       offset << 4, flags, window, 0, 0) + options
@@ -45,13 +31,12 @@ def client_packet(client_port, seq, payload=b"", ack=0, window=65535, flags=0x18
 
 
 def run_with_timeout(testcase, fn, timeout=10.0):
-    """Run fn in a thread so a bug cannot hang the test suite."""
     result = {}
 
     def target():
         try:
             result["value"] = fn()
-        except BaseException as e:   # pragma: no cover - reported below
+        except BaseException as e:
             result["error"] = e
 
     t = threading.Thread(target=target, daemon=True)
@@ -65,26 +50,20 @@ def run_with_timeout(testcase, fn, timeout=10.0):
 
 
 class FakePeer:
-    """Simulated TCP client for run_conn_send.
-
-    sendto() receives the server's data segments. Segments can be dropped
-    (simulated loss); delivered data is ACKed cumulatively by pushing an ACK
-    packet into the connection's packet queue, like the dispatcher would.
-    """
 
     def __init__(self, client_port, server_isn, window=65535, drop_offsets=(),
                  drop_all=False, zero_window_for=0.0):
         self.client_port = client_port
         self.base = server_isn
         self.window = window
-        self.drop_offsets = set(drop_offsets)   # each offset is dropped once
+        self.drop_offsets = set(drop_offsets)
         self.drop_all = drop_all
         self.zero_until = time.time() + zero_window_for
         self.data = bytearray()
         self.ooo = {}
-        self.segments = []          # (offset, length) of every data segment seen
-        self.acks = []              # ack offsets sent back
-        self.max_outstanding = 0    # max bytes sent beyond the last ACK
+        self.segments = []
+        self.acks = []
+        self.max_outstanding = 0
 
     def current_window(self):
         return 0 if time.time() < self.zero_until else self.window
@@ -101,7 +80,7 @@ class FakePeer:
         if self.drop_all:
             return len(packet)
         if off in self.drop_offsets:
-            self.drop_offsets.discard(off)      # lost in the network
+            self.drop_offsets.discard(off)
             return len(packet)
 
         window = self.current_window()
@@ -126,7 +105,6 @@ class FakePeer:
 
 
 class RecordingSocket:
-    """Fake raw socket that records every packet sent by run_conn_recv."""
 
     def __init__(self):
         self.sent = []
@@ -137,21 +115,20 @@ class RecordingSocket:
 
 
 class ConnectionTestCase(unittest.TestCase):
-    """Registers fake connections, short timers and silences the logs."""
 
     _next_port = 40000
 
     def setUp(self):
-        self._saved = (rc.TCP_INITIAL_RTO, rc.TCP_MIN_RTO, rc.TCP_MAX_RETRIES)
-        rc.TCP_INITIAL_RTO = 0.3
-        rc.TCP_MIN_RTO = 0.2
+        self._saved = (rtt_mod.TCP_INITIAL_RTO, rtt_mod.TCP_MIN_RTO, sender_mod.TCP_MAX_RETRIES)
+        rtt_mod.TCP_INITIAL_RTO = 0.3
+        rtt_mod.TCP_MIN_RTO = 0.2
         self._keys = []
         out = contextlib.redirect_stdout(io.StringIO())
         out.__enter__()
         self.addCleanup(out.__exit__, None, None, None)
 
     def tearDown(self):
-        rc.TCP_INITIAL_RTO, rc.TCP_MIN_RTO, rc.TCP_MAX_RETRIES = self._saved
+        rtt_mod.TCP_INITIAL_RTO, rtt_mod.TCP_MIN_RTO, sender_mod.TCP_MAX_RETRIES = self._saved
         for key in self._keys:
             with rc.connections_lock:
                 rc.connections.pop(key, None)
@@ -172,10 +149,6 @@ class ConnectionTestCase(unittest.TestCase):
         self._keys.append(key)
         return conn, state
 
-
-# ---------------------------------------------------------------------------
-# 1. Flow control: receive buffer, rwnd, window update
-# ---------------------------------------------------------------------------
 
 class TestReceiveBuffer(unittest.TestCase):
 
@@ -208,15 +181,15 @@ class TestReceiveBuffer(unittest.TestCase):
     def test_duplicate_and_overlapping_data_is_trimmed(self):
         buf = rc.ReceiveBuffer(capacity=1000, rcv_nxt=0)
         buf.receive(0, b"hello")
-        self.assertEqual(buf.receive(0, b"hello"), 0)          # full duplicate
-        self.assertEqual(buf.receive(3, b"loworld"), 5)        # "lo" already received
+        self.assertEqual(buf.receive(0, b"hello"), 0)
+        self.assertEqual(buf.receive(3, b"loworld"), 5)
         self.assertEqual(buf.read(), b"helloworld")
 
     def test_data_beyond_window_is_cut(self):
         buf = rc.ReceiveBuffer(capacity=10, rcv_nxt=0)
         self.assertEqual(buf.receive(0, b"x" * 15), 10)
         self.assertEqual(buf.rwnd, 0)
-        self.assertEqual(buf.receive(10, b"y"), 0)            # zero window: dropped
+        self.assertEqual(buf.receive(10, b"y"), 0)
         self.assertEqual(buf.read(), b"x" * 10)
 
     def test_window_right_edge_never_shrinks(self):
@@ -224,13 +197,13 @@ class TestReceiveBuffer(unittest.TestCase):
         edge = buf.rcv_nxt + buf.advertise()
         buf.receive(0, b"a" * 400)
         self.assertEqual(buf.rcv_nxt + buf.advertise(), edge)
-        buf.receive(600, b"b" * 100)                           # out of order
+        buf.receive(600, b"b" * 100)
         self.assertEqual(buf.rcv_nxt + buf.advertise(), edge)
 
     def test_sequence_number_wraparound(self):
         start = rc.SEQ_MOD - 50
         buf = rc.ReceiveBuffer(capacity=1000, rcv_nxt=start)
-        buf.receive(rc.seq_add(start, 50), b"B" * 50)        # after the wrap, out of order
+        buf.receive(rc.seq_add(start, 50), b"B" * 50)
         self.assertEqual(buf.receive(start, b"A" * 50), 100)
         self.assertEqual(buf.rcv_nxt, 50)
         self.assertEqual(buf.read(), b"A" * 50 + b"B" * 50)
@@ -238,11 +211,11 @@ class TestReceiveBuffer(unittest.TestCase):
     def test_window_update_only_when_window_opens_enough(self):
         buf = rc.ReceiveBuffer(capacity=10000, rcv_nxt=0, mss=1000)
         buf.receive(0, b"a" * 5000)
-        buf.advertise()                                        # advertised 5000
+        buf.advertise()
         buf.read(500)
-        self.assertFalse(buf.window_update_needed())           # +500 < MSS
+        self.assertFalse(buf.window_update_needed())
         buf.read(600)
-        self.assertTrue(buf.window_update_needed())            # +1100 >= MSS
+        self.assertTrue(buf.window_update_needed())
         buf.advertise()
         self.assertFalse(buf.window_update_needed())
 
@@ -254,7 +227,7 @@ class TestReceiveBuffer(unittest.TestCase):
 class TestPacketParsing(unittest.TestCase):
 
     def test_parse_mss_option(self):
-        options = b"\x02\x04\x05\xb4" + b"\x01\x01\x04\x02"   # MSS 1460, NOP, NOP, SACK-permitted
+        options = b"\x02\x04\x05\xb4" + b"\x01\x01\x04\x02"
         pkt = client_packet(1234, 1, flags=0x02, options=options)
         seg = rc.parse_tcp_segment(pkt)
         self.assertEqual(rc.parse_mss_option(seg.header), 1460)
@@ -273,12 +246,7 @@ class TestPacketParsing(unittest.TestCase):
         self.assertEqual(rc.TcpControlState(peer_mss=9000).mss, rc.DEFAULT_MSS)
 
 
-# ---------------------------------------------------------------------------
-# 2. Congestion control: slow start, CUBIC congestion avoidance
-# ---------------------------------------------------------------------------
-
 def run_rtts(cc, rtt, n, start_time):
-    """Simulate n round trips without loss: each RTT one full cwnd is ACKed."""
     now = start_time
     for _ in range(n):
         now += rtt
@@ -311,7 +279,7 @@ class TestCubicSlowStart(unittest.TestCase):
         cc.ssthresh = 15
         cc.on_ack(10 * MSS, 0.0, 0.1)
         self.assertGreaterEqual(cc.cwnd, 15)
-        self.assertLess(cc.cwnd, 16)                  # not 20: the rest is congestion avoidance
+        self.assertLess(cc.cwnd, 16)
         self.assertFalse(cc.in_slow_start)
 
 
@@ -319,13 +287,13 @@ class TestCubicCongestionAvoidance(unittest.TestCase):
 
     def make_after_loss(self, cwnd=100):
         cc = rc.CubicCC(mss=MSS, initial_cwnd=cwnd)
-        cc.ssthresh = cwnd                           # leave slow start
-        cc.on_loss(0.0)                              # W_max = 100, cwnd = 70
+        cc.ssthresh = cwnd
+        cc.on_loss(0.0)
         return cc
 
     def test_k_is_time_to_return_to_w_max(self):
         cc = self.make_after_loss()
-        cc.on_ack(MSS, 0.0, 0.1)                     # starts the CUBIC epoch
+        cc.on_ack(MSS, 0.0, 0.1)
         expected_k = ((100 - 70) / rc.CUBIC_C) ** (1 / 3)
         self.assertAlmostEqual(cc.k, expected_k, places=3)
         self.assertAlmostEqual(cc.w_cubic(cc.k), cc.w_max)
@@ -333,17 +301,17 @@ class TestCubicCongestionAvoidance(unittest.TestCase):
     def test_concave_then_plateau_then_convex(self):
         cc = self.make_after_loss()
         rtt = 0.1
-        now = run_rtts(cc, rtt, 10, 0.0)             # t = 1 s, far below K = 4.2 s
+        now = run_rtts(cc, rtt, 10, 0.0)
         early = cc.cwnd
         self.assertGreater(early, 70)
         self.assertLess(early, 100)
 
-        now = run_rtts(cc, rtt, int(cc.k / rtt) - 10, now)   # t close to K
-        self.assertAlmostEqual(cc.cwnd, 100, delta=3)        # plateau around W_max
+        now = run_rtts(cc, rtt, int(cc.k / rtt) - 10, now)
+        self.assertAlmostEqual(cc.cwnd, 100, delta=3)
 
         before = cc.cwnd
-        run_rtts(cc, rtt, 30, now)                   # t = K + 3 s
-        self.assertGreater(cc.cwnd, before + 5)      # convex growth: probing beyond W_max
+        run_rtts(cc, rtt, 30, now)
+        self.assertGreater(cc.cwnd, before + 5)
 
     def test_growth_slows_down_near_w_max(self):
         cc = self.make_after_loss()
@@ -352,25 +320,21 @@ class TestCubicCongestionAvoidance(unittest.TestCase):
         now = run_rtts(cc, rtt, 10, 0.0)
         first_second = cc.cwnd - start
         mid = cc.cwnd
-        run_rtts(cc, rtt, 10, now + 2.0)             # jump to t ~ 3..4 s (near K)
+        run_rtts(cc, rtt, 10, now + 2.0)
         near_k = cc.cwnd - mid
         self.assertGreater(first_second, 0)
-        # growth per second gets smaller while approaching W_max (concave region)
         later_rate = near_k / 3.0
         self.assertLess(later_rate, first_second)
 
     def test_reno_friendly_region_after_loss(self):
-        # With a tiny C the cubic curve stays almost flat, so W_est (Reno) wins.
-        # Below W_max, W_est grows by alpha = 3(1-beta)/(1+beta) segments per RTT.
         cc = rc.CubicCC(mss=MSS, initial_cwnd=100, c=1e-6)
         cc.ssthresh = 100
-        cc.on_loss(0.0)                              # cwnd = 70, W_max = 100
+        cc.on_loss(0.0)
         run_rtts(cc, 0.1, 10, 0.0)
         alpha = 3 * (1 - rc.CUBIC_BETA) / (1 + rc.CUBIC_BETA)
         self.assertAlmostEqual(cc.cwnd, 70 + 10 * alpha, delta=0.5)
 
     def test_reno_friendly_alpha_is_one_above_w_max(self):
-        # No loss yet: W_max = cwnd, so W_est >= W_max and alpha = 1 (standard Reno: +1 seg/RTT)
         cc = rc.CubicCC(mss=MSS, initial_cwnd=20, c=1e-6)
         cc.ssthresh = 20
         run_rtts(cc, 0.1, 10, 0.0)
@@ -387,10 +351,6 @@ class TestCubicCongestionAvoidance(unittest.TestCase):
             prev = cc.cwnd
 
 
-# ---------------------------------------------------------------------------
-# 3. Loss / RTO reactions
-# ---------------------------------------------------------------------------
-
 class TestLossReaction(unittest.TestCase):
 
     def test_triple_dupack_multiplicative_decrease(self):
@@ -404,8 +364,8 @@ class TestLossReaction(unittest.TestCase):
 
     def test_fast_convergence(self):
         cc = rc.CubicCC(mss=MSS, initial_cwnd=100)
-        cc.on_loss(0.0)                              # W_max = 100
-        cc.cwnd = 80                                 # next loss below the previous W_max
+        cc.on_loss(0.0)
+        cc.cwnd = 80
         cc.on_loss(1.0)
         self.assertAlmostEqual(cc.w_max, 80 * (1 + rc.CUBIC_BETA) / 2)
         self.assertAlmostEqual(cc.cwnd, 56)
@@ -433,7 +393,7 @@ class TestLossReaction(unittest.TestCase):
     def test_slow_start_after_rto_then_cubic(self):
         cc = rc.CubicCC(mss=MSS, initial_cwnd=40)
         cc.on_timeout()
-        run_rtts(cc, 0.1, 5, 0.0)                    # 1 -> 2 -> 4 -> 8 -> 16 -> 28 (capped)
+        run_rtts(cc, 0.1, 5, 0.0)
         self.assertFalse(cc.in_slow_start)
         self.assertLess(cc.cwnd, 40)
 
@@ -469,10 +429,6 @@ class TestRttEstimator(unittest.TestCase):
         self.assertEqual(r.rto, 5.0)
 
 
-# ---------------------------------------------------------------------------
-# Sender (run_conn_send) with a simulated client
-# ---------------------------------------------------------------------------
-
 class TestRunConnSend(ConnectionTestCase):
 
     def send(self, conn, peer, payload, timeout=10.0):
@@ -499,7 +455,7 @@ class TestRunConnSend(ConnectionTestCase):
     def test_initial_burst_limited_by_cwnd(self):
         conn, state = self.make_connection()
         peer = FakePeer(conn.client_port, conn.server_seq, drop_all=True)
-        rc.TCP_MAX_RETRIES = 0
+        sender_mod.TCP_MAX_RETRIES = 0
         self.send(conn, peer, b"x" * 50 * MSS)
         first_burst = [s for s in peer.segments if s[0] < rc.INITIAL_CWND_SEGMENTS * MSS]
         self.assertEqual(peer.segments[:len(first_burst)], first_burst)
@@ -521,7 +477,7 @@ class TestRunConnSend(ConnectionTestCase):
         self.assertEqual(self.send(conn, peer, payload), len(payload))
         self.assertEqual(bytes(peer.data), payload)
         self.assertEqual(state.cc.loss_events, 1)
-        self.assertEqual(state.cc.timeouts, 0)            # recovered without waiting for RTO
+        self.assertEqual(state.cc.timeouts, 0)
         self.assertLess(state.cc.ssthresh, float("inf"))
         self.assertEqual(sum(1 for off, _ in peer.segments if off == lost), 2)
 
@@ -531,12 +487,11 @@ class TestRunConnSend(ConnectionTestCase):
         payload = os.urandom(3 * MSS)
         self.assertEqual(self.send(conn, peer, payload), len(payload))
         self.assertEqual(bytes(peer.data), payload)
-        self.assertEqual(state.cc.timeouts, 1)            # no dup ACKs possible -> RTO
+        self.assertEqual(state.cc.timeouts, 1)
         self.assertEqual(state.cc.loss_events, 0)
-        self.assertAlmostEqual(state.cc.ssthresh, 12 * rc.CUBIC_BETA)   # cwnd was 10 + 2
-        self.assertAlmostEqual(state.cc.cwnd, 2.0)        # 1 MSS + 1 acked in slow start
-        # Karn: the retransmitted segment gives no RTT sample, so the backed-off RTO stays
-        self.assertGreaterEqual(state.rtt.rto, 2 * rc.TCP_MIN_RTO)
+        self.assertAlmostEqual(state.cc.ssthresh, 12 * rc.CUBIC_BETA)
+        self.assertAlmostEqual(state.cc.cwnd, 2.0)
+        self.assertGreaterEqual(state.rtt.rto, 2 * rtt_mod.TCP_MIN_RTO)
 
     def test_sequence_numbers_wrap_around(self):
         conn, state = self.make_connection(server_isn=rc.SEQ_MOD - 3000)
@@ -551,14 +506,14 @@ class TestRunConnSend(ConnectionTestCase):
         payload = os.urandom(5 * MSS)
         self.assertEqual(self.send(conn, peer, payload), len(payload))
         self.assertEqual(bytes(peer.data), payload)
-        self.assertEqual(peer.segments[0], (0, 1))        # first segment is a 1-byte probe
+        self.assertEqual(peer.segments[0], (0, 1))
         self.assertEqual(state.cc.timeouts, 0)
         self.assertEqual(state.cc.loss_events, 0)
 
     def test_abort_after_max_retries(self):
-        rc.TCP_INITIAL_RTO = 0.02
-        rc.TCP_MIN_RTO = 0.02
-        rc.TCP_MAX_RETRIES = 2
+        rtt_mod.TCP_INITIAL_RTO = 0.02
+        rtt_mod.TCP_MIN_RTO = 0.02
+        sender_mod.TCP_MAX_RETRIES = 2
         conn, state = self.make_connection()
         peer = FakePeer(conn.client_port, conn.server_seq, drop_all=True)
         self.assertEqual(self.send(conn, peer, b"x" * 1000), -1)
@@ -569,10 +524,6 @@ class TestRunConnSend(ConnectionTestCase):
         other = conn._replace(client_port=1)
         self.assertEqual(rc.run_conn_send(RecordingSocket(), other, b"data"), -1)
 
-
-# ---------------------------------------------------------------------------
-# Receiver (run_conn_recv) with a simulated client
-# ---------------------------------------------------------------------------
 
 class TestRunConnRecv(ConnectionTestCase):
 
@@ -590,7 +541,7 @@ class TestRunConnRecv(ConnectionTestCase):
         self.assertEqual(self.recv(conn, sock), b"GET / HTTP/1.1\r\n\r\n")
         ack = sock.sent[0]
         self.assertEqual(ack.ack, CLIENT_ISN + 18)
-        self.assertEqual(ack.window, rc.RECV_BUFFER_SIZE - 18)   # advertised before the app read
+        self.assertEqual(ack.window, rc.RECV_BUFFER_SIZE - 18)
 
     def test_out_of_order_produces_duplicate_ack_then_full_data(self):
         conn, state = self.make_connection()
@@ -599,7 +550,7 @@ class TestRunConnRecv(ConnectionTestCase):
         self.push(conn, CLIENT_ISN, b"hello")
         self.assertEqual(self.recv(conn, sock), b"helloworld")
         acks = [seg.ack for seg in sock.sent]
-        self.assertEqual(acks[0], CLIENT_ISN)                      # duplicate ACK for the gap
+        self.assertEqual(acks[0], CLIENT_ISN)
         self.assertEqual(acks[1], CLIENT_ISN + 10)
 
     def test_duplicate_segment_is_not_delivered_twice(self):
@@ -607,10 +558,10 @@ class TestRunConnRecv(ConnectionTestCase):
         sock = RecordingSocket()
         self.push(conn, CLIENT_ISN, b"hello")
         self.assertEqual(self.recv(conn, sock), b"hello")
-        self.push(conn, CLIENT_ISN, b"hello")                     # retransmitted by the client
+        self.push(conn, CLIENT_ISN, b"hello")
         self.push(conn, CLIENT_ISN + 5, b"world")
         self.assertEqual(self.recv(conn, sock), b"world")
-        self.assertEqual(sock.sent[1].ack, CLIENT_ISN + 5)        # duplicate is re-ACKed
+        self.assertEqual(sock.sent[1].ack, CLIENT_ISN + 5)
 
     def test_records_client_window(self):
         conn, state = self.make_connection()
@@ -623,13 +574,13 @@ class TestRunConnRecv(ConnectionTestCase):
         sock = RecordingSocket()
         self.push(conn, CLIENT_ISN, b"a" * 1000)
         self.recv(conn, sock)
-        self.assertEqual(len(sock.sent), 2)                      # ACK + window update
+        self.assertEqual(len(sock.sent), 2)
         self.assertEqual(sock.sent[1].window, rc.RECV_BUFFER_SIZE)
 
     def test_fin_is_acked_and_connection_removed(self):
         conn, state = self.make_connection()
         sock = RecordingSocket()
-        self.push(conn, CLIENT_ISN, b"", flags=0x11)               # FIN + ACK
+        self.push(conn, CLIENT_ISN, b"", flags=0x11)
         self.assertEqual(self.recv(conn, sock), b"")
         self.assertEqual(sock.sent[0].ack, CLIENT_ISN + 1)
         self.assertNotIn((CLIENT_IP, conn.client_port), rc.connections)
