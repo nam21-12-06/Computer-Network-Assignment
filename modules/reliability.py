@@ -10,11 +10,11 @@ def check_sequence(client_seq, pkt_seq, payload):
     return in_order, next_ack
 
 
-def check_ack(pending, pkt_ack):
-    if pending is None:
+def check_ack(waiting, pkt_ack):
+    if waiting is None:
         return False
-    pending_seq, pending_payload = pending
-    expected_ack = (pending_seq + len(pending_payload)) % (2 ** 32)
+    waiting_seq, waiting_payload = waiting
+    expected_ack = (waiting_seq + len(waiting_payload)) % (2 ** 32)
     return pkt_ack == expected_ack
 
 
@@ -32,14 +32,14 @@ def send_reliable(s, conn_info, payload):
     client_key = (conn_info.client_ip, conn_info.client_port)
     with raw.connections_lock:
         session = raw.connections.get(client_key)
-        if session is None or session.pending is not None:
+        if session is None or session.waiting is not None:
             return -1
         if not payload:
             return 0
 
     try:
         start_seq = session.server_seq
-        pending = (start_seq, payload)
+        waiting = (start_seq, payload)
         for attempt in range(1, 6):
             sent_at = time.monotonic()
             bytes_sent = raw.send_tcp_data_segment(s, conn_info.server_ip, conn_info.client_ip, conn_info.server_port, conn_info.client_port, seq=start_seq, ack_seq=session.client_seq, payload=payload)
@@ -47,7 +47,7 @@ def send_reliable(s, conn_info, payload):
                 next_seq = (start_seq + bytes_sent) % (2 ** 32)
                 with raw.connections_lock:
                     if client_key in raw.connections:
-                        raw.connections[client_key] = session._replace(server_seq=next_seq, pending=pending, last_activity=time.time())
+                        raw.connections[client_key] = session._replace(server_seq=next_seq, waiting=waiting, last_activity=time.time())
                 packet_queue = raw.get_packet_queue(client_key)
             deadline = sent_at + session.rto
             try:
@@ -55,16 +55,16 @@ def send_reliable(s, conn_info, payload):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    packet, _ = packet_queue.get(timeout=remaining)
+                    packet, nouse_addr = packet_queue.get(timeout=remaining)
                     pkt_ack = raw.get_ack(packet)
-                    if not check_ack(pending, pkt_ack):
+                    if not check_ack(waiting, pkt_ack):
                         continue
                     with raw.connections_lock:
                         current = raw.connections[client_key]
-                        if current.pending == pending:
+                        if current.waiting == waiting:
                             if attempt == 1:
                                 current = update_timeout(current, time.monotonic() - sent_at)
-                            raw.connections[client_key] = current._replace(pending=None, last_activity=time.time())
+                            raw.connections[client_key] = current._replace(waiting=None, last_activity=time.time())
                     return bytes_sent
             except queue.Empty:
                 continue
