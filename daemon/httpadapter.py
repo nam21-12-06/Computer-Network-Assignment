@@ -188,18 +188,13 @@ class HttpAdapter:
         # Send response using streaprous raw connection
         response = response if isinstance(response, bytes) else response.encode("utf-8")
         print(f"[HttpAdapter] HTTP Response ({len(response)} bytes): {response[:200]}")
-        #
-        # TODO run_conn_send packet
-        # run_conn_send(..)
+        run_conn_send(raw_socket, conn_info, response)
         
-        # Wait longer to ensure response is transmitted, client processes it, and sends ACK
-        import time
-        time.sleep(5.0)
+        # Brief pause to let client process data before tearing down
+        time.sleep(0.5)
         
         # Close connection with FIN packet
-        #
-        # TODO run_conn_send packet
-        # close_connection(...)
+        close_connection(raw_socket, conn_info)
 
     async def handle_client_coroutine(self, reader, writer):
         """
