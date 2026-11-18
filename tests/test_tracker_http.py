@@ -4,7 +4,8 @@ import asyncio
 import json
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
 from apps import tracker_app
 from apps.peer import PeerNode, TrackerClient
@@ -27,8 +28,21 @@ class TrackerHandler(BaseHTTPRequestHandler):
         pass
 
 
-class TrackerHttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_two_peers_register_discover_connect_and_disconnect(self):
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+class TrackerHttpIntegrationTests(unittest.TestCase):
+    def test_two_peers_register_discover_connect_and_disconnect(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._check_two_peers())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    async def _check_two_peers(self):
         tracker_app.tracker = TrackerService()
         server = ThreadingHTTPServer(("127.0.0.1", 0), TrackerHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -49,6 +63,6 @@ class TrackerHttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await alice.close()
             await bob.close()
-            await asyncio.to_thread(server.shutdown)
+            await asyncio.get_event_loop().run_in_executor(None, server.shutdown)
             server.server_close()
             thread.join(timeout=2)

@@ -36,10 +36,14 @@ def main():
     parser.add_argument("--listen-port", type=int, required=True)
     parser.add_argument("--connect", action="append", default=[])
     logging.basicConfig(level=logging.INFO)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(run(parser.parse_args()))
+        loop.run_until_complete(run(parser.parse_args()))
     except KeyboardInterrupt:
         pass
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

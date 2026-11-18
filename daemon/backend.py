@@ -181,7 +181,12 @@ def run_backend(ip, port, routes, interface=None):
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
 
-       asyncio.run(async_server(ip, port, routes))
+       loop = asyncio.new_event_loop()
+       asyncio.set_event_loop(loop)
+       try:
+           loop.run_until_complete(async_server(ip, port, routes))
+       finally:
+           loop.close()
        return
 
     # Check if IP is localhost/loopback
@@ -250,7 +255,12 @@ def run_backend_standard(ip, port, routes):
     
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
-        asyncio.run(async_server(ip, port, routes))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(async_server(ip, port, routes))
+        finally:
+            loop.close()
         return
 
     # Process socket object using standard socket

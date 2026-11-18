@@ -1,8 +1,7 @@
 """REST routes for tracker, peer discovery, and channel membership."""
 
-from __future__ import annotations
-
 import json
+from typing import Tuple
 
 from daemon import StreapRous
 
@@ -27,7 +26,7 @@ def _payload(body: object) -> dict:
     return payload
 
 
-def _error_response(error: TrackerError) -> tuple[dict, int]:
+def _error_response(error: TrackerError) -> Tuple[dict, int]:
     return {"error": str(error)}, error.status_code
 
 
@@ -38,7 +37,7 @@ def _request_ip(headers: dict, payload: dict) -> object:
 
 @app.route("/tracker/register", methods=["POST"])
 @app.route("/submit-info/", methods=["POST"])
-def register_peer(headers: dict, body: object) -> tuple[dict, int]:
+def register_peer(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         peer = tracker.register_peer(
@@ -53,7 +52,7 @@ def register_peer(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/tracker/heartbeat", methods=["POST"])
-def heartbeat(headers: dict, body: object) -> tuple[dict, int]:
+def heartbeat(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         peer = tracker.heartbeat(
@@ -68,7 +67,7 @@ def heartbeat(headers: dict, body: object) -> tuple[dict, int]:
 
 @app.route("/tracker/peers", methods=["POST"])
 @app.route("/get-list/", methods=["GET"])
-def list_peers(headers: dict, body: object) -> tuple[dict, int]:
+def list_peers(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         peers = tracker.list_active_peers(exclude_peer_id=data.get("peer_id"))
@@ -78,7 +77,7 @@ def list_peers(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/tracker/disconnect", methods=["POST"])
-def disconnect_peer(headers: dict, body: object) -> tuple[dict, int]:
+def disconnect_peer(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         peer = tracker.disconnect_peer(data.get("peer_id"))
@@ -89,7 +88,7 @@ def disconnect_peer(headers: dict, body: object) -> tuple[dict, int]:
 
 @app.route("/tracker/connect-peer", methods=["POST"])
 @app.route("/connect-peer/", methods=["POST"])
-def connect_peer(headers: dict, body: object) -> tuple[dict, int]:
+def connect_peer(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         target = tracker.connect_peer(data.get("peer_id"), data.get("target_peer_id"))
@@ -99,7 +98,7 @@ def connect_peer(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/channels/create", methods=["POST"])
-def create_channel(headers: dict, body: object) -> tuple[dict, int]:
+def create_channel(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         channel = tracker.create_channel(data.get("peer_id"), data.get("name"))
@@ -109,7 +108,7 @@ def create_channel(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/channels/join", methods=["POST"])
-def join_channel(headers: dict, body: object) -> tuple[dict, int]:
+def join_channel(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         channel = tracker.join_channel(data.get("peer_id"), data.get("channel_id"))
@@ -119,7 +118,7 @@ def join_channel(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/channels/leave", methods=["POST"])
-def leave_channel(headers: dict, body: object) -> tuple[dict, int]:
+def leave_channel(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         channel = tracker.leave_channel(data.get("peer_id"), data.get("channel_id"))
@@ -129,7 +128,7 @@ def leave_channel(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/channels/mine", methods=["POST"])
-def list_my_channels(headers: dict, body: object) -> tuple[dict, int]:
+def list_my_channels(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         channels = tracker.list_channels_for_peer(data.get("peer_id"))
@@ -139,7 +138,7 @@ def list_my_channels(headers: dict, body: object) -> tuple[dict, int]:
 
 
 @app.route("/channels/members", methods=["POST"])
-def list_channel_members(headers: dict, body: object) -> tuple[dict, int]:
+def list_channel_members(headers: dict, body: object) -> Tuple[dict, int]:
     try:
         data = _payload(body)
         members = tracker.list_channel_members(data.get("channel_id"))

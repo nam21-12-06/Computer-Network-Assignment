@@ -32,7 +32,19 @@ class InMemoryTrackerClient:
         raise AssertionError(path)
 
 
-class PeerTests(unittest.IsolatedAsyncioTestCase):
+class PeerTests(unittest.TestCase):
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.asyncSetUp())
+
+    def tearDown(self):
+        try:
+            self.loop.run_until_complete(self.asyncTearDown())
+        finally:
+            self.loop.close()
+            asyncio.set_event_loop(None)
+
     async def asyncSetUp(self):
         self.tracker = InMemoryTrackerClient()
         self.alice = PeerNode("alice", "alice", self.tracker, "127.0.0.1", 0, 0.05)
@@ -44,7 +56,10 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         await self.alice.close()
         await self.bob.close()
 
-    async def test_discovery_connect_exchange_and_cleanup(self):
+    def test_discovery_connect_exchange_and_cleanup(self):
+        self.loop.run_until_complete(self._check_discovery_connect_exchange_and_cleanup())
+
+    async def _check_discovery_connect_exchange_and_cleanup(self):
         peers = await self.alice.discover()
         self.assertEqual([peer["peer_id"] for peer in peers], ["bob"])
         await self.alice.connect_peer("bob")
@@ -63,7 +78,10 @@ class PeerTests(unittest.IsolatedAsyncioTestCase):
         await self.alice.close()
         self.assertEqual([peer["peer_id"] for peer in self.tracker.service.list_active_peers()], ["bob"])
 
-    async def test_heartbeat_is_sent(self):
+    def test_heartbeat_is_sent(self):
+        self.loop.run_until_complete(self._check_heartbeat_is_sent())
+
+    async def _check_heartbeat_is_sent(self):
         await asyncio.sleep(0.13)
         self.assertGreaterEqual(self.tracker.heartbeats, 2)
 

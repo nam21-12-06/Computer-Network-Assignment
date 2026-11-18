@@ -97,7 +97,7 @@ def detect_interface(ip):
         # On macOS, try to get active interface using ifconfig
         try:
             import subprocess
-            result = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
+            result = subprocess.run(["route", "-n", "get", "default"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             for line in result.stdout.split('\n'):
                 if 'interface:' in line:
                     return line.split('interface:')[1].strip()
