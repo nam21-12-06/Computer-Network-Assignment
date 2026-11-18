@@ -26,13 +26,8 @@ import threading
 import time
 import queue
 from collections import namedtuple
+import netifaces
 
-try:
-    import netifaces
-except ImportError:
-    netifaces = None
-
-# Reliability module (Thành – feature/reliability)
 from modules import reliability
 
 # Import streaprout packet dispatcher functions
@@ -45,7 +40,6 @@ from .streaprous_packet_dispatcher import (
     _SYN_KEY,
 )
 
-# Flow control and TCP state imports (Nhân – features/flow_congestion_control)
 from .flow_control import MAX_WINDOW
 from .tcp_state import (
     create_tcp_state,
