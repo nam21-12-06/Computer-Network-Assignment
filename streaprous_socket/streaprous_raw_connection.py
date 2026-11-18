@@ -52,7 +52,7 @@ conn_struct = namedtuple('conn_struct', [
     'client_seq',
     'expected_final_ack',
     'last_activity',
-    'pending',
+    'waiting',
     'estimated_rtt',
     'dev_rtt',
     'rto'
@@ -770,21 +770,21 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                 print(f"[Streap_raw] Received ACK from {client_ip}:{client_port} (Ack={pkt_ack})")
                 # Check if the ack server waiting for is the same to pkt_ack
                 #ex : server_seq = 2001, so if ACK = 2001 its gonna be accepted, if 1999 is declined
-                if session.pending is None:
+                if session.waiting is None:
                     print(f"[Streap_raw] Ignoring ACK {pkt_ack}; no payload is waiting")
                     continue
 
-                pending_seq, pending_payload = session.pending
-                expected_ack = (pending_seq + len(pending_payload)) & 0xFFFFFFFF
-                if not reliability.check_ack(session.pending, pkt_ack):
+                waiting_seq, waiting_payload = session.waiting
+                expected_ack = (waiting_seq + len(waiting_payload)) & 0xFFFFFFFF
+                if not reliability.check_ack(session.waiting, pkt_ack):
                     print(f"[Streap_raw] Ignoring ACK {pkt_ack}; expected {expected_ack}")
                     continue
 
                 with connections_lock:
                     current = connections.get(client_key)
-                    if current is not None and current.pending == session.pending:
+                    if current is not None and current.waiting == session.waiting:
                         connections[client_key] = current._replace(
-                            pending=None,
+                            waiting=None,
                             last_activity=time.time()
                         )
 
