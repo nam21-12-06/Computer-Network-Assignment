@@ -53,7 +53,6 @@ from .tcp_state import (
 
 # Connection structure
 # This structure holds connection and its state information
-# Fields waiting/estimated_rtt/dev_rtt/rto added by Thành for reliability
 conn_struct = namedtuple('conn_struct', [
     'client_ip',
     'client_port',
@@ -64,10 +63,10 @@ conn_struct = namedtuple('conn_struct', [
     'client_seq',
     'expected_final_ack',
     'last_activity',
-    'waiting',       # (seq, payload) tuple while waiting for ACK; None otherwise
-    'estimated_rtt', # Smoothed RTT estimate (seconds)
-    'dev_rtt',       # RTT deviation (seconds)
-    'rto',           # Retransmission timeout (seconds)
+    'waiting',
+    'estimated_rtt',
+    'dev_rtt',
+    'rto',
 ])
 # Default values so existing 9-argument instantiation continues to work
 conn_struct.__new__.__defaults__ = (None, 0.5, 0.25, 1.0)
@@ -716,13 +715,12 @@ def connect(s: socket.socket, src_ip: str, src_port: int, dst_ip: str,
 
 
 def get_ack(packet):
-    """Extract the ACK number from a raw TCP packet. Returns None if no ACK flag."""
     ip_header_len = (packet[0] & 0x0F) * 4
     tcp_packet = packet[ip_header_len:]
     if len(tcp_packet) < 20:
         return None
     header = struct.unpack("!HHLLBBHHH", tcp_packet[:20])
-    if header[5] & 0x10:  # ACK flag set
+    if header[5] & 0x10:
         return header[3]
     return None
 
@@ -732,10 +730,6 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
     Receive data on an established connection using raw sockets.
     This function handles incoming packets for a specific connection by reading
     from the packet dispatcher's per-connection queue.
-
-    Uses reliability.check_sequence (Thành) to enforce in-order delivery:
-    out-of-order or duplicate segments are ACKed with the current expected
-    sequence number but not delivered to the caller.
 
     Args:
         s: raw socket
@@ -851,7 +845,6 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
                     print(f"[Streap_raw] Received {len(app_payload)} bytes of data from {client_ip}:{client_port}")
                     print(f"[Streap_raw] Received payload: {app_payload[:100]}...")
 
-                    # Sequence check: only deliver in-order data (Thành – reliability)
                     in_order, next_ack = reliability.check_sequence(session.client_seq, pkt_seq, app_payload)
 
                     ack_packet = build_tcp_packet(session.server_ip, client_ip, listen_port, client_port,
@@ -875,7 +868,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
                     # Return the received payload
                     return app_payload
 
-            # Handle pure ACK (no data) – used by send_reliable to confirm delivery
+            # Handle pure ACK (no data)
             elif ack_flag and not syn_flag and not psh_flag and not has_data:
                 print(f"[Streap_raw] Received ACK from {client_ip}:{client_port} (Ack={pkt_ack})")
                 if session.waiting is None:
@@ -907,9 +900,6 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
 def run_conn_send(s: socket.socket, conn_info: conn_struct, payload: bytes) -> int:
     """
     Send data reliably on an established connection using raw sockets.
-
-    Delegates to reliability.send_reliable (Thành – feature/reliability) which
-    implements stop-and-wait with RTT-based RTO and up to 5 retransmissions.
 
     Args:
         s: Raw socket
