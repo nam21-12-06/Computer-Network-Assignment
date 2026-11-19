@@ -3,19 +3,19 @@ import time
 
 
 def check_sequence(client_seq, pkt_seq, payload):
-    in_order = pkt_seq == client_seq
+    in_order = (pkt_seq == client_seq)
     next_ack = client_seq
     if in_order:
-        next_ack = (client_seq + len(payload)) % (2 ** 32)
-    return in_order, next_ack
+        next_ack = (client_seq + len(payload))%(2 ** 32)
+    return (in_order, next_ack)
 
 
 def check_ack(waiting, pkt_ack):
     if waiting is None:
         return False
     waiting_seq, waiting_payload = waiting
-    expected_ack = (waiting_seq + len(waiting_payload)) % (2 ** 32)
-    return pkt_ack == expected_ack
+    expected_ack = (waiting_seq + len(waiting_payload))%(2 ** 32)
+    return (pkt_ack == expected_ack)
 
 
 def update_timeout(session, sample_rtt):
@@ -23,7 +23,8 @@ def update_timeout(session, sample_rtt):
     estimated_rtt = 0.875 * session.estimated_rtt + 0.125 * sample_rtt
     #slide 86 Beta = 0.25
     dev_rtt = 0.75 * session.dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
-    return session._replace(estimated_rtt=estimated_rtt, dev_rtt=dev_rtt, rto=estimated_rtt + 4 * dev_rtt)
+    rto_new = estimate_rrt + 4*dev_rtt
+    return session._replace(estimated_rtt=estimated_rtt, dev_rtt=dev_rtt, rto=rto_new)
 
 
 def send_reliable(s, conn_info, payload):
@@ -32,7 +33,9 @@ def send_reliable(s, conn_info, payload):
     client_key = (conn_info.client_ip, conn_info.client_port)
     with raw.connections_lock:
         session = raw.connections.get(client_key)
-        if session is None or session.waiting is not None:
+        if session is None:
+            return -1
+        if session.waiting is not None:
             return -1
         if not payload:
             return 0
