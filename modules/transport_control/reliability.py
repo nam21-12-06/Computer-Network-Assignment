@@ -40,12 +40,15 @@ def send_reliable(s, conn_info, payload):
         if not payload:
             return 0
 
+    state = raw.get_tcp_state(client_key)
+
     try:
         start_seq = session.server_seq
         waiting = (start_seq, payload)
         for attempt in range(1, 6):
             sent_at = time.monotonic()
-            bytes_sent = raw.send_tcp_data_segment(s, conn_info.server_ip, conn_info.client_ip, conn_info.server_port, conn_info.client_port, seq=start_seq, ack_seq=session.client_seq, payload=payload)
+            window = state.rcv.advertise() if state else 5840
+            bytes_sent = raw.send_tcp_data_segment(s, conn_info.server_ip, conn_info.client_ip, conn_info.server_port, conn_info.client_port, seq=start_seq, ack_seq=session.client_seq, payload=payload, window=window)
             if attempt == 1:
                 next_seq = (start_seq + bytes_sent) % (2 ** 32)
                 with raw.connections_lock:
@@ -60,7 +63,11 @@ def send_reliable(s, conn_info, payload):
                         break
                     packet, nouse_addr = packet_queue.get(timeout=remaining)
                     pkt_ack = raw.get_ack(packet)
+                    if state and pkt_ack is not None:
+                        state.peer_rwnd = raw.get_window(packet)
                     if not check_ack(waiting, pkt_ack):
+                        if state and pkt_ack == start_seq:
+                            state.cc.on_dup_ack()
                         continue
                     with raw.connections_lock:
                         current = raw.connections[client_key]
@@ -68,9 +75,13 @@ def send_reliable(s, conn_info, payload):
                             if attempt == 1:
                                 current = update_timeout(current, time.monotonic() - sent_at)
                             raw.connections[client_key] = current._replace(waiting=None, last_activity=time.time())
+                    if state:
+                        state.cc.on_new_ack(time.time())
                     return bytes_sent
             except queue.Empty:
-                continue
+                pass
+            if state:
+                state.cc.on_timeout()
         return -1
     except Exception:
         return -1
