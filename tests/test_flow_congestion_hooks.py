@@ -6,6 +6,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from transport_support import ScriptedQueue, scripted_transport
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from streaprous_socket import streaprous_raw_connection as raw
@@ -21,19 +23,6 @@ class FakeSocket:
     def sendto(self, packet, address):
         self.sent.append((packet, address))
         return len(packet)
-
-
-class ScriptedQueue:
-    def __init__(self, packets):
-        self.packets = list(packets)
-
-    def get(self, timeout):
-        if not self.packets:
-            raise queue.Empty()
-        item = self.packets.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
 
 
 def incoming(flags, seq, ack, window=5840, payload=b""):
@@ -58,6 +47,7 @@ class HookTestBase(unittest.TestCase):
 
     def setUp(self):
         self.key = ("127.0.0.1", 40000)
+        raw.drop_tcp_state(self.key)
         self.connection = raw.conn_struct(
             "127.0.0.1", 40000, "127.0.0.2", 9000,
             "ESTABLISHED", 2001, 101, 2001, time.time(),
@@ -70,11 +60,13 @@ class HookTestBase(unittest.TestCase):
     def tearDown(self):
         with raw.connections_lock:
             raw.connections.pop(self.key, None)
+        raw.drop_tcp_state(self.key)
+        raw.remove_packet_queue(self.key)
         drop_tcp_state(self.key)
 
     def send(self, packets, payload=b"abc"):
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=ScriptedQueue(packets)):
+        with scripted_transport(raw, self.key, ScriptedQueue(packets)):
             result = raw.run_conn_send(sock, self.connection, payload)
         return result, sock
 
@@ -103,6 +95,7 @@ class TestSendHooks(HookTestBase):
 
     def test_triple_dup_ack_cuts_cwnd(self):
         self.state.cc.cwnd = 10.0 * MSS
+        self.state.peer_rwnd = 5840
         packets = [ack_packet(2001), ack_packet(2001), ack_packet(2001), ack_packet(2004)]
         result, _ = self.send(packets)
         self.assertEqual(result, 3)

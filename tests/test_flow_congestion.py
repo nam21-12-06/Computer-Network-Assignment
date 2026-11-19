@@ -82,8 +82,8 @@ class TestUsableWindow(unittest.TestCase):
     def test_full_window(self):
         self.assertEqual(usable_window(3000, 1000, cwnd=2000, rwnd=5000), 0)
 
-    def test_zero_window_probe_when_nothing_in_flight(self):
-        self.assertEqual(usable_window(1000, 1000, cwnd=2000, rwnd=0), 1)
+    def test_zero_window_blocks_new_data_when_nothing_in_flight(self):
+        self.assertEqual(usable_window(1000, 1000, cwnd=2000, rwnd=0), 0)
 
     def test_zero_window_with_data_in_flight(self):
         self.assertEqual(usable_window(1001, 1000, cwnd=2000, rwnd=0), 0)

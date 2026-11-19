@@ -39,6 +39,8 @@ _current_raw_socket = None
 _SYN_KEY = ("SYN", None)
 
 def _packet_dispatcher(s, listen_port):
+    from .streaprous_raw_connection import drain_packets
+
     global _packet_dispatcher_running
     s.settimeout(0.2)                      # lets the loop notice a stop request
     while _packet_dispatcher_running:
@@ -84,6 +86,7 @@ def _packet_dispatcher(s, listen_port):
                 target.put_nowait((packet, addr))
             except queue.Full:
                 pass
+            drain_packets(s, key)
         except Exception as e:
             print(f"[Sock_dispatcher] Dispatcher error: {e}")
 

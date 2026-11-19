@@ -38,6 +38,4 @@ class ReceiveBuffer:
 
 def usable_window(last_byte_sent, last_byte_acked, cwnd, rwnd):
     inflight = last_byte_sent - last_byte_acked
-    if rwnd == 0 and inflight == 0:
-        return 1
     return max(0, min(int(cwnd), rwnd) - inflight)

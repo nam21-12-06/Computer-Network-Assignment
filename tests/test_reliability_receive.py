@@ -56,6 +56,7 @@ def incoming_segment(seq, payload=b"", flags=0x18,
 class ReceiveSequenceTests(unittest.TestCase):
     def setUp(self):
         self.key = (CLIENT_IP, CLIENT_PORT)
+        raw.drop_tcp_state(self.key)
         self.connection = raw.conn_struct(
             CLIENT_IP, CLIENT_PORT, SERVER_IP, SERVER_PORT,
             "ESTABLISHED", 2001, 101, 2001, time.time(),
@@ -66,6 +67,8 @@ class ReceiveSequenceTests(unittest.TestCase):
     def tearDown(self):
         with raw.connections_lock:
             raw.connections.pop(self.key, None)
+        raw.drop_tcp_state(self.key)
+        raw.remove_packet_queue(self.key)
 
     def receive(self, segments):
         packet_queue = queue.Queue()

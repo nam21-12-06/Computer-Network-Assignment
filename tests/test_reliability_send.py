@@ -11,6 +11,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from transport_support import ScriptedQueue, scripted_transport
+
 # Ensure repository root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -28,21 +30,6 @@ class FakeSocket:
             raise OSError("send failed")
         self.sent.append((packet, address))
         return len(packet)
-
-
-class ScriptedQueue:
-    def __init__(self, packets):
-        self.packets = list(packets)
-        self.timeouts = []
-
-    def get(self, timeout):
-        self.timeouts.append(timeout)
-        if not self.packets:
-            raise queue.Empty()
-        item = self.packets.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
 
 
 def incoming_ack(ack_number):
@@ -66,6 +53,7 @@ def incoming_data():
 class PendingSendTests(unittest.TestCase):
     def setUp(self):
         self.key = ("127.0.0.1", 40000)
+        raw.drop_tcp_state(self.key)
         self.connection = raw.conn_struct(
             "127.0.0.1", 40000, "127.0.0.2", 9000,
             "ESTABLISHED", 2001, 101, 2001, time.time(),
@@ -77,11 +65,13 @@ class PendingSendTests(unittest.TestCase):
     def tearDown(self):
         with raw.connections_lock:
             raw.connections.pop(self.key, None)
+        raw.drop_tcp_state(self.key)
+        raw.remove_packet_queue(self.key)
 
     def test_sent_payload_is_kept_until_ack(self):
         sock = FakeSocket()
         packet_queue = ScriptedQueue([(incoming_ack(2004), ("127.0.0.1", 0))])
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             self.assertEqual(raw.run_conn_send(sock, self.connection, b"abc"), 3)
 
         session = raw.connections[self.key]
@@ -132,7 +122,7 @@ class PendingSendTests(unittest.TestCase):
             (incoming_ack(2004), ("127.0.0.1", 0)),
         ])
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             self.assertEqual(raw.run_conn_send(sock, self.connection, b"abc"), 3)
 
         sequences = [struct.unpack("!I", packet[24:28])[0] for packet, _ in sock.sent]
@@ -142,15 +132,15 @@ class PendingSendTests(unittest.TestCase):
     def test_stops_after_five_attempts(self):
         packet_queue = ScriptedQueue([queue.Empty() for _ in range(5)])
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             self.assertEqual(raw.run_conn_send(sock, self.connection, b"abc"), -1)
 
         self.assertEqual(len(sock.sent), 5)
 
     def test_first_rtt_sample_updates_timeout(self):
         packet_queue = ScriptedQueue([(incoming_ack(2004), ("127.0.0.1", 0))])
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue), \
-             patch.object(reliability.time, "monotonic", side_effect=[0.0, 0.0, 1.0]):
+        packet_queue.rtt = 1.0
+        with scripted_transport(raw, self.key, packet_queue):
             raw.run_conn_send(FakeSocket(), self.connection, b"abc")
 
         session = raw.connections[self.key]
@@ -163,8 +153,7 @@ class PendingSendTests(unittest.TestCase):
             queue.Empty(),
             (incoming_ack(2004), ("127.0.0.1", 0)),
         ])
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue), \
-             patch.object(time, "monotonic", side_effect=[0.0, 0.1, 0.2, 0.3, 0.4]):
+        with scripted_transport(raw, self.key, packet_queue):
             raw.run_conn_send(FakeSocket(), self.connection, b"abc")
 
         session = raw.connections[self.key]
@@ -188,7 +177,7 @@ class PendingSendTests(unittest.TestCase):
 
     def test_single_byte_waits_for_next_ack_number(self):
         packet_queue = ScriptedQueue([(incoming_ack(2002), ("127.0.0.1", 0))])
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             result = raw.run_conn_send(FakeSocket(), self.connection, b"x")
         self.assertEqual(result, 1)
         self.assertEqual(raw.connections[self.key].server_seq, 2002)
@@ -197,7 +186,7 @@ class PendingSendTests(unittest.TestCase):
         payload = b"\x00\xff\x00"
         packet_queue = ScriptedQueue([(incoming_ack(2004), ("127.0.0.1", 0))])
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             result = raw.run_conn_send(sock, self.connection, payload)
         self.assertEqual(result, 3)
         self.assertEqual(sock.sent[0][0][40:], payload)
@@ -208,7 +197,7 @@ class PendingSendTests(unittest.TestCase):
             (incoming_ack(2003), ("127.0.0.1", 0)),
             (incoming_ack(2004), ("127.0.0.1", 0)),
         ])
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             result = raw.run_conn_send(FakeSocket(), self.connection, b"abc")
         self.assertEqual(result, 3)
         self.assertIsNone(raw.connections[self.key].waiting)
@@ -218,7 +207,7 @@ class PendingSendTests(unittest.TestCase):
             queue.Empty(), (incoming_ack(2004), ("127.0.0.1", 0)),
         ])
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             raw.run_conn_send(sock, self.connection, b"a\x00b")
         self.assertEqual([packet[40:] for packet, _ in sock.sent],
                          [b"a\x00b", b"a\x00b"])
@@ -228,7 +217,7 @@ class PendingSendTests(unittest.TestCase):
             raw.connections[self.key] = self.connection._replace(server_seq=0xFFFFFFFE)
         packet_queue = ScriptedQueue([(incoming_ack(1), ("127.0.0.1", 0))])
         sock = FakeSocket()
-        with patch.object(raw, "get_packet_queue", return_value=packet_queue):
+        with scripted_transport(raw, self.key, packet_queue):
             result = raw.run_conn_send(sock, self.connection, b"abc")
         self.assertEqual(result, 3)
         self.assertEqual(struct.unpack("!I", sock.sent[0][0][24:28])[0], 0xFFFFFFFE)
