@@ -23,7 +23,7 @@ def update_timeout(session, sample_rtt):
     estimated_rtt = 0.875 * session.estimated_rtt + 0.125 * sample_rtt
     #slide 86 Beta = 0.25
     dev_rtt = 0.75 * session.dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
-    rto_new = estimate_rrt + 4*dev_rtt
+    rto_new = estimated_rtt + 4*dev_rtt
     return session._replace(estimated_rtt=estimated_rtt, dev_rtt=dev_rtt, rto=rto_new)
 
 
