@@ -40,8 +40,8 @@ from .streaprous_packet_dispatcher import (
     _SYN_KEY,
 )
 
-from ..modules.transport_control.flow_control import MAX_WINDOW
-from ..modules.transport_control.tcp_state import (
+from modules.transport_control.flow_control import MAX_WINDOW
+from modules.transport_control.tcp_state import (
     create_tcp_state,
     get_tcp_state,
     update_peer_rwnd,
@@ -725,6 +725,11 @@ def get_ack(packet):
     return None
 
 
+def get_window(packet):
+    ip_header_len = (packet[0] & 0x0F) * 4
+    return struct.unpack("!H", packet[ip_header_len + 14:ip_header_len + 16])[0]
+
+
 def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = None) -> bytes:
     """
     Receive data on an established connection using raw sockets.
@@ -747,6 +752,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
 
     # Get the packet queue for this connection from the dispatcher
     packet_queue = get_packet_queue(client_key)
+    state = get_tcp_state(client_key)
 
     print(f"[Streap_raw] run_conn_recv: Starting receive loop for {client_ip}:{client_port} (waiting for data...)")
 
@@ -832,6 +838,9 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
                 if client_key in connections:
                     connections[client_key] = session._replace(last_activity=time.time())
 
+            if state:
+                state.peer_rwnd = tcph[6]
+
             # Handle data payload (PSH + ACK) or (ACK with data)
             # Some clients may not set PSH flag for small requests
             has_data = len(tcp_packet) > ((tcp_packet[12] >> 4) & 0x0F) * 4
@@ -847,8 +856,12 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
 
                     in_order, next_ack = reliability.check_sequence(session.client_seq, pkt_seq, app_payload)
 
+                    if state and in_order:
+                        state.rcv.on_data(app_payload)
+
                     ack_packet = build_tcp_packet(session.server_ip, client_ip, listen_port, client_port,
-                                                  seq=session.server_seq, ack_seq=next_ack, ack=1)
+                                                  seq=session.server_seq, ack_seq=next_ack, ack=1,
+                                                  window=state.rcv.advertise() if state else 5840)
                     ip_header = build_ip_header(session.server_ip, client_ip, socket.IPPROTO_TCP, len(ack_packet))
                     s.sendto(ip_header + ack_packet, (client_ip, 0))
                     print(f"[Streap_raw] Sent ACK for data (Ack={next_ack})")
@@ -864,6 +877,9 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct, timeout: float = Non
                                 client_seq=next_ack,
                                 last_activity=time.time()
                             )
+
+                    if state:
+                        state.rcv.read()
 
                     # Return the received payload
                     return app_payload
@@ -924,8 +940,7 @@ def close_connection(s: socket.socket, conn_info: conn_struct):
     with connections_lock:
         if client_key in connections:
             session = connections[client_key]
-            # Use flow-control state for accurate ACK and window (Thành)
-            ack_seq = state.rcv.last_byte_rcvd if state else session.client_seq
+            ack_seq = session.client_seq
             window = state.rcv.advertise() if state else 5840
             # Send FIN packet
             fin_packet = build_tcp_packet(listen_ip, client_ip, listen_port, client_port,
