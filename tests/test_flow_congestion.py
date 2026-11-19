@@ -6,9 +6,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from streaprous_socket import streaprous_raw_connection as rc
-from streaprous_socket.flow_control import ReceiveBuffer, usable_window, RCV_BUFFER, MAX_WINDOW
-from streaprous_socket.congestion_control import CubicCC, MSS, INITIAL_SSTHRESH, CUBIC_C, CUBIC_BETA
-from streaprous_socket.tcp_state import (
+from modules.transport_control.flow_control import ReceiveBuffer, usable_window, RCV_BUFFER, MAX_WINDOW
+from modules.transport_control.congestion_control import CubicCC, MSS, INITIAL_SSTHRESH, CUBIC_C, CUBIC_BETA
+from modules.transport_control.tcp_state import (
     TcpControlState, create_tcp_state, get_tcp_state, update_peer_rwnd, drop_tcp_state,
 )
 

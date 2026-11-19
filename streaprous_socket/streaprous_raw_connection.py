@@ -28,7 +28,7 @@ import queue
 from collections import namedtuple
 import netifaces
 
-from modules import reliability
+from modules.transport_control import reliability
 
 # Import streaprout packet dispatcher functions
 from .streaprous_packet_dispatcher import (
@@ -40,8 +40,8 @@ from .streaprous_packet_dispatcher import (
     _SYN_KEY,
 )
 
-from .flow_control import MAX_WINDOW
-from .tcp_state import (
+from ..modules.transport_control.flow_control import MAX_WINDOW
+from ..modules.transport_control.tcp_state import (
     create_tcp_state,
     get_tcp_state,
     update_peer_rwnd,

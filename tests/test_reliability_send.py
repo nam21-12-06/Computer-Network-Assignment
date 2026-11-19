@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from streaprous_socket import streaprous_raw_connection as raw
-from modules import reliability
+from modules.transport_control import reliability
 
 
 class FakeSocket:
